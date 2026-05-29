@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>KYOBODT</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <strong class="brand">KYOBO<span>DT</span></strong>
+      </header>
+
+      <section class="purpose">
+        <strong>증명사진 자동 변환</strong>
+        <p>얼굴이 잘 보이는 사진을 올리면 증명사진 형식으로 확인하고 변환합니다.</p>
+      </section>
+
+      <section class="workspace">
+        <section class="stage-wrap" aria-label="사진 미리보기">
+          <canvas id="photoCanvas" width="900" height="1200"></canvas>
+          <label id="uploadDrop" class="upload-drop">
+            <span class="upload-icon">＋</span>
+            <strong>사진 올리기</strong>
+            <span class="upload-hint">갤러리 또는 카메라</span>
+          </label>
+        </section>
+      </section>
+
+      <section class="status-panel" aria-live="polite">
+        <p id="providerStatus">AI 서버 확인 중</p>
+        <p id="validationStatus">사진을 올리면 자동으로 확인하고 변환합니다.</p>
+        <button id="downloadBtn" class="primary hidden" type="button" disabled>PNG 저장</button>
+      </section>
+
+      <section class="examples" aria-label="사진 예시">
+        <article class="example-card good">
+          <div class="sample-face" aria-hidden="true">
+            <span class="head"></span>
+            <span class="neck"></span>
+            <span class="shoulder"></span>
+          </div>
+          <strong>좋은 사진</strong>
+          <p>정면, 밝은 얼굴</p>
+        </article>
+        <article class="example-card">
+          <div class="sample-face far" aria-hidden="true">
+            <span class="head"></span>
+            <span class="neck"></span>
+            <span class="shoulder"></span>
+          </div>
+          <strong>얼굴이 작음</strong>
+          <p>가까이 촬영</p>
+        </article>
+        <article class="example-card">
+          <div class="sample-face blocked" aria-hidden="true">
+            <span class="head"></span>
+            <span class="bar"></span>
+            <span class="neck"></span>
+            <span class="shoulder"></span>
+          </div>
+          <strong>가려짐</strong>
+          <p>얼굴 전체 노출</p>
+        </article>
+      </section>
+
+      <input id="galleryInput" class="file-input" type="file" accept="image/*" />
+
+      <dialog id="passwordDialog" class="password-dialog">
+        <form id="passwordForm" method="dialog">
+          <strong>비밀번호 확인</strong>
+          <p>사진 업로드와 AI 변환을 사용하려면 비밀번호를 입력하세요.</p>
+          <input id="passwordInput" type="password" autocomplete="current-password" placeholder="비밀번호" />
+          <span id="passwordError" class="password-error" aria-live="polite"></span>
+          <div class="dialog-actions">
+            <button id="passwordCancel" class="secondary" type="button">취소</button>
+            <button class="primary" type="submit">확인</button>
+          </div>
+        </form>
+      </dialog>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
