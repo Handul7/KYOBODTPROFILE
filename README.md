@@ -49,3 +49,21 @@ http://YOUR_LOCAL_IP:5173
 - `.env` is intentionally ignored and must not be committed.
 - ChatGPT subscriptions do not include OpenAI API quota. API billing is separate.
 - For local AI, set `AI_PROVIDER=local` and provide `LOCAL_AI_ENDPOINT` / `LOCAL_AI_VALIDATE_ENDPOINT`.
+
+## Railway Deployment
+
+Use the GitHub repository as the Railway source. Railway can run this app with the default `npm run start` command.
+
+Set these Railway variables:
+
+```env
+AI_PROVIDER=openai
+OPENAI_API_KEY=sk-your-api-key
+OPENAI_IMAGE_MODEL=gpt-image-1.5
+OPENAI_VISION_MODEL=gpt-4.1-mini
+OPENAI_IMAGE_QUALITY=high
+APP_PASSWORD=change-this-password
+HOST=0.0.0.0
+```
+
+Do not set `PORT` on Railway. Railway provides it automatically.
