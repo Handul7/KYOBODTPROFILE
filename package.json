@@ -10,6 +10,7 @@
     "start": "node server.mjs",
     "start:openai": "AI_PROVIDER=openai node server.mjs",
     "start:local": "AI_PROVIDER=local node server.mjs",
+    "local-ai": "local-ai/.venv/bin/uvicorn server:app --app-dir local-ai --host 127.0.0.1 --port 8765",
     "check": "node --check app.js && node --check server.mjs"
   }
 }

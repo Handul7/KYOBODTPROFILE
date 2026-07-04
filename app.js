@@ -11,12 +11,14 @@ const passwordInput = document.querySelector("#passwordInput");
 const passwordError = document.querySelector("#passwordError");
 const passwordCancel = document.querySelector("#passwordCancel");
 
-const preset = { width: 900, height: 1200, name: "kyobodt-id-photo.png" };
-const defaultBackground = "#f7f9fc";
+// 사진관 프로필 바스트샷: 3×4 비율, 300dpi 인쇄 기준 2배 해상도
+const preset = { width: 708, height: 944, name: "kyobodt-profile.png" };
+const profileSpec = "profile";
+const profileBackground = "#d9dce1"; // 비즈니스 그레이
 
 const state = {
   image: null,
-  sourceDataUrl: "",
+  originalDataUrl: "",
   objectUrl: "",
   appPassword: sessionStorage.getItem("kyobodt_password") || "",
   passwordResolve: null,
@@ -31,22 +33,23 @@ function setCanvasSize() {
 }
 
 function drawGuide() {
+  // 바스트샷 구도: 정수리~턱 = 세로의 58%, 정수리 위 여백 12%
   const { width, height } = canvas;
   ctx.save();
   ctx.strokeStyle = "rgba(31, 111, 235, 0.32)";
   ctx.lineWidth = Math.max(3, width * 0.004);
   ctx.setLineDash([14, 14]);
-  ctx.strokeRect(width * 0.29, height * 0.17, width * 0.42, height * 0.3);
+  ctx.strokeRect(width * 0.31, height * 0.12, width * 0.38, height * 0.44);
   ctx.beginPath();
-  ctx.moveTo(width * 0.18, height * 0.72);
-  ctx.quadraticCurveTo(width * 0.5, height * 0.57, width * 0.82, height * 0.72);
+  ctx.moveTo(width * 0.12, height * 0.88);
+  ctx.quadraticCurveTo(width * 0.5, height * 0.66, width * 0.88, height * 0.88);
   ctx.stroke();
   ctx.restore();
 }
 
 function draw() {
   setCanvasSize();
-  ctx.fillStyle = defaultBackground;
+  ctx.fillStyle = profileBackground;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   if (!state.image) {
@@ -80,7 +83,7 @@ function loadFile(file) {
   };
 
   reader.onload = async () => {
-    state.sourceDataUrl = String(reader.result || "");
+    state.originalDataUrl = String(reader.result || "");
     await validateAndTransform();
   };
 
@@ -119,7 +122,7 @@ passwordForm.addEventListener("submit", async (event) => {
 passwordCancel.addEventListener("click", () => closePasswordDialog(false));
 
 async function validateAndTransform() {
-  if (!state.sourceDataUrl || state.transforming) return;
+  if (!state.originalDataUrl || state.transforming) return;
   if (!state.aiReady) {
     validationStatus.textContent = "AI 설정이 완료된 뒤 다시 시도하세요.";
     validationStatus.className = "invalid";
@@ -133,7 +136,7 @@ async function validateAndTransform() {
 
   try {
     const validation = await postJson("/api/validate", {
-      imageDataUrl: state.sourceDataUrl,
+      imageDataUrl: state.originalDataUrl,
       password: state.appPassword,
     });
 
@@ -147,9 +150,9 @@ async function validateAndTransform() {
     validationStatus.className = "";
 
     const result = await postJson("/api/portrait", {
-      imageDataUrl: state.sourceDataUrl,
-      spec: "passport",
-      background: defaultBackground,
+      imageDataUrl: state.originalDataUrl,
+      spec: profileSpec,
+      background: profileBackground,
       password: state.appPassword,
     });
 
@@ -189,7 +192,6 @@ async function loadGeneratedImage(dataUrl) {
     const image = new Image();
     image.onload = () => {
       state.image = image;
-      state.sourceDataUrl = dataUrl;
       draw();
       resolve();
     };

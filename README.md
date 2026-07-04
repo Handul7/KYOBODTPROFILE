@@ -44,6 +44,37 @@ For same Wi-Fi mobile testing, use your Mac's local network IP:
 http://YOUR_LOCAL_IP:5173
 ```
 
+## Local AI (no API key, fully offline)
+
+A CV-based local AI server lives in `local-ai/`. It validates photos with MediaPipe face
+detection plus numeric lighting/sharpness checks, then converts them with auto white
+balance, CLAHE lighting correction, rembg background removal, and face-guided cropping.
+
+One-time setup:
+
+```bash
+cd local-ai
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cd ..
+```
+
+Set `.env`:
+
+```env
+AI_PROVIDER=local
+LOCAL_AI_ENDPOINT=http://127.0.0.1:8765/transform
+LOCAL_AI_VALIDATE_ENDPOINT=http://127.0.0.1:8765/validate
+APP_PASSWORD=kyobo
+```
+
+Run both servers (two terminals):
+
+```bash
+npm run local-ai   # Python AI server on :8765 (first run downloads a ~176MB model)
+npm run start      # Web app on :5173
+```
+
 ## Notes
 
 - `.env` is intentionally ignored and must not be committed.
