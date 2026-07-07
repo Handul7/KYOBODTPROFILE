@@ -84,6 +84,9 @@ class TransformBody(BaseModel):
     prompt: str | None = None
     spec: str | None = "passport"
     background: str | None = "#f7f9fc"
+    # False면 색·조명·피부 보정을 건너뛰고 배경 교체와 규격 크롭만 수행
+    # (생성형 모델 결과물을 규격에 맞출 때 사용)
+    enhance: bool = True
 
 
 def decode_data_url(data_url: str) -> np.ndarray:
@@ -308,12 +311,12 @@ def transform(body: TransformBody):
 
     bg_color = parse_hex_color(body.background)
 
-    corrected = enhance_lighting(auto_white_balance(rgb))
+    corrected = enhance_lighting(auto_white_balance(rgb)) if body.enhance else rgb
 
     faces = detect_faces(corrected)
     face = faces[0] if faces else None
 
-    retouched = smooth_skin(corrected, face)
+    retouched = smooth_skin(corrected, face) if body.enhance else corrected
     composed = replace_background(retouched, bg_color)
     result = crop_to_spec(composed, face, body.spec or "passport", bg_color)
 

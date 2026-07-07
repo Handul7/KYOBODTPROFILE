@@ -75,6 +75,24 @@ npm run local-ai   # Python AI server on :8765 (first run downloads a ~176MB mod
 npm run start      # Web app on :5173
 ```
 
+## Gemini hybrid mode (recommended for on-the-spot photos)
+
+For casual photos taken on the spot (odd angles, bad lighting, cluttered rooms),
+`AI_PROVIDER=gemini` regenerates the photo as a studio portrait with Gemini, then pipes
+the result through the local pipeline so every output gets the exact same bust-shot
+composition and background color. Clothing and identity are preserved.
+
+```env
+AI_PROVIDER=gemini
+GEMINI_API_KEY=your-key-from-aistudio.google.com
+GEMINI_IMAGE_MODEL=gemini-2.5-flash-image
+LOCAL_AI_ENDPOINT=http://127.0.0.1:8765/transform
+LOCAL_AI_VALIDATE_ENDPOINT=http://127.0.0.1:8765/validate
+```
+
+Both servers must run (`npm run local-ai` + `npm run start`). Validation stays local
+and free; only the transform calls Gemini (roughly a few cents per photo).
+
 ## Notes
 
 - `.env` is intentionally ignored and must not be committed.

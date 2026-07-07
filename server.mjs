@@ -11,6 +11,7 @@ const host = process.env.HOST || "0.0.0.0";
 const provider = process.env.AI_PROVIDER || (process.env.OPENAI_API_KEY ? "openai" : "local");
 const openaiModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1.5";
 const openaiVisionModel = process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini";
+const geminiModel = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
 const localEndpoint = process.env.LOCAL_AI_ENDPOINT || "";
 const localValidateEndpoint = process.env.LOCAL_AI_VALIDATE_ENDPOINT || "";
 const appPassword = process.env.APP_PASSWORD || "kyobo";
@@ -91,6 +92,16 @@ function getConfig() {
     };
   }
 
+  if (provider === "gemini") {
+    if (!process.env.GEMINI_API_KEY) {
+      return { provider: "Gemini", ready: false, message: "GEMINI_API_KEY가 필요합니다." };
+    }
+    if (!localEndpoint) {
+      return { provider: "Gemini", ready: false, message: "규격 보정용 LOCAL_AI_ENDPOINT가 필요합니다." };
+    }
+    return { provider: "Gemini", ready: true, message: "Gemini + 로컬 규격 보정 사용 가능" };
+  }
+
   return { provider: "Mock", ready: true, message: "목업 AI 사용 중" };
 }
 
@@ -106,6 +117,7 @@ async function transformPortrait(body) {
   if (!body?.imageDataUrl) throw httpError(400, "imageDataUrl이 필요합니다.");
 
   if (provider === "openai") return transformWithOpenAI(body);
+  if (provider === "gemini") return transformWithGemini(body);
   if (provider === "local") return transformWithLocal(body);
   if (provider === "mock") return { provider: "Mock", imageDataUrl: body.imageDataUrl };
 
@@ -116,6 +128,7 @@ async function validatePortraitInput(body) {
   if (!body?.imageDataUrl) throw httpError(400, "imageDataUrl이 필요합니다.");
 
   if (provider === "openai") return validateWithOpenAI(body.imageDataUrl);
+  if (provider === "gemini") return validateWithLocal(body.imageDataUrl);
   if (provider === "local") return validateWithLocal(body.imageDataUrl);
   if (provider === "mock") {
     return {
@@ -240,6 +253,72 @@ async function transformWithOpenAI({ imageDataUrl, spec, background }) {
   throw httpError(502, "OpenAI 응답에 이미지 데이터가 없습니다.");
 }
 
+async function transformWithGemini({ imageDataUrl, spec, background }) {
+  if (!process.env.GEMINI_API_KEY) {
+    throw httpError(503, "GEMINI_API_KEY를 설정한 뒤 서버를 다시 실행하세요.");
+  }
+  if (!localEndpoint) {
+    throw httpError(503, "규격 보정용 LOCAL_AI_ENDPOINT를 설정하세요.");
+  }
+
+  const { buffer, mime } = parseDataUrl(imageDataUrl);
+  const apiResponse = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "x-goog-api-key": process.env.GEMINI_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { inline_data: { mime_type: mime, data: buffer.toString("base64") } },
+              { text: buildGeminiPrompt() },
+            ],
+          },
+        ],
+      }),
+    }
+  );
+
+  const payload = await apiResponse.json();
+  if (!apiResponse.ok) {
+    throw httpError(apiResponse.status, payload.error?.message || "Gemini 이미지 변환 실패");
+  }
+
+  const parts = payload.candidates?.[0]?.content?.parts || [];
+  const imagePart = parts.find((part) => part.inlineData?.data || part.inline_data?.data);
+  if (!imagePart) {
+    const refusal = parts.find((part) => part.text)?.text || "";
+    throw httpError(502, refusal ? `Gemini가 이미지를 반환하지 않았습니다: ${refusal.slice(0, 120)}` : "Gemini 응답에 이미지 데이터가 없습니다.");
+  }
+  const inline = imagePart.inlineData || imagePart.inline_data;
+  const generatedDataUrl = `data:${inline.mimeType || inline.mime_type || "image/png"};base64,${inline.data}`;
+
+  // 생성 결과를 로컬 파이프라인에 통과시켜 구도·배경색을 규격에 정확히 맞춘다 (색보정은 끔)
+  const refined = await transformWithLocal({
+    imageDataUrl: generatedDataUrl,
+    spec,
+    background,
+    enhance: false,
+  });
+  return { provider: "Gemini", imageDataUrl: refined.imageDataUrl };
+}
+
+function buildGeminiPrompt() {
+  return [
+    "Retake this photo as a professional Korean studio profile portrait for a job application.",
+    "Preserve the person's identity exactly: same face, same facial features, same hairstyle, and the same clothing they are wearing.",
+    "Turn the head and body to face the camera directly, eyes looking straight at the camera, natural relaxed expression with a slight smile.",
+    "Recompose as a centered head-and-shoulders bust shot with the head upright.",
+    "Replace the environment with a plain solid light gray studio background and soft, even, flattering studio lighting with no harsh shadows or color cast on the face.",
+    "Remove any other people, hands, phones, or distracting objects.",
+    "Photorealistic, sharp focus, high quality. Do not add text, watermark, or accessories.",
+  ].join(" ");
+}
+
 async function transformWithLocal(body) {
   if (!localEndpoint) {
     throw httpError(503, "LOCAL_AI_ENDPOINT를 설정한 뒤 서버를 다시 실행하세요.");
@@ -253,6 +332,7 @@ async function transformWithLocal(body) {
       prompt: buildPrompt(body.spec, body.background),
       spec: body.spec,
       background: body.background,
+      enhance: body.enhance !== false,
     }),
   });
 
