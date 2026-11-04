@@ -1,9 +1,11 @@
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { extname, join, normalize, resolve, sep } from "node:path";
+import { extname, join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 
-const root = process.cwd();
+const root = dirname(fileURLToPath(import.meta.url));
 loadDotEnv();
 
 const port = Number(process.env.PORT || 5173);
@@ -14,7 +16,20 @@ const openaiVisionModel = process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini";
 const geminiModel = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
 const localEndpoint = process.env.LOCAL_AI_ENDPOINT || "";
 const localValidateEndpoint = process.env.LOCAL_AI_VALIDATE_ENDPOINT || "";
-const appPassword = process.env.APP_PASSWORD || "kyobo";
+const appPassword = process.env.APP_PASSWORD || (process.env.NODE_ENV === "production" ? "" : "kyobo");
+const maxImageBytes = 8 * 1024 * 1024;
+const sessions = new Map();
+const loginAttempts = new Map();
+const sessionDuration = 8 * 60 * 60 * 1000;
+const timeoutMs = Math.max(100, Number(process.env.AI_TIMEOUT_MS) || 120_000);
+const cookieName = "kyobodt_session";
+const securityHeaders = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+  "X-Frame-Options": "DENY",
+  "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+};
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -27,51 +42,137 @@ const mimeTypes = {
   ".svg": "image/svg+xml",
 };
 
-const server = createServer(async (request, response) => {
-  try {
-    const url = new URL(request.url, `http://${request.headers.host}`);
-
-    if (request.method === "GET" && url.pathname === "/api/config") {
-      return sendJson(response, 200, getConfig());
+export function createAppServer() {
+  return createServer(async (request, response) => {
+    const controller = new AbortController();
+    response.once("close", () => { if (!response.writableEnded) controller.abort(); });
+    try {
+      const url = new URL(request.url, "http://localhost");
+      if (request.method === "GET" && url.pathname === "/healthz") {
+        return sendJson(response, 200, { ok: true });
+      }
+      if (request.method === "GET" && url.pathname === "/api/config") {
+        return sendJson(response, 200, { ...getConfig(), maxImageBytes });
+      }
+      if (request.method === "GET" && url.pathname === "/api/session") {
+        return sendJson(response, 200, { authenticated: Boolean(getSession(request)) });
+      }
+      if (request.method === "POST" && url.pathname.startsWith("/api/")) {
+        checkRequestOrigin(request);
+        if (!/^application\/json(?:;|$)/i.test(request.headers["content-type"] || "")) {
+          throw httpError(415, "JSON 형식으로 요청해 주세요.");
+        }
+        if (url.pathname === "/api/auth") {
+          if (!appPassword) throw httpError(503, "관리자가 이용 비밀번호를 설정해야 합니다.");
+          const address = request.socket.remoteAddress || "unknown";
+          const now = Date.now();
+          for (const [key, attempt] of loginAttempts) if (attempt.until <= now) loginAttempts.delete(key);
+          let attempt = loginAttempts.get(address);
+          if (attempt?.count >= 10) {
+            response.setHeader("Retry-After", String(Math.ceil((attempt.until - now) / 1000)));
+            throw httpError(429, "비밀번호를 여러 번 틀렸습니다. 15분 후 다시 시도해 주세요.");
+          }
+          const body = await readJson(request, 4096);
+          // Re-read after the await: concurrent attempts may have exhausted the limit.
+          attempt = loginAttempts.get(address);
+          if (attempt?.until <= Date.now()) attempt = undefined;
+          if (attempt?.count >= 10) {
+            response.setHeader("Retry-After", String(Math.ceil((attempt.until - Date.now()) / 1000)));
+            throw httpError(429, "비밀번호를 여러 번 틀렸습니다. 15분 후 다시 시도해 주세요.");
+          }
+          if (!passwordMatches(body.password)) {
+            if (loginAttempts.size >= 1000) loginAttempts.delete(loginAttempts.keys().next().value);
+            loginAttempts.set(address, { count: (attempt?.count || 0) + 1, until: attempt?.until || now + 15 * 60_000 });
+            throw httpError(401, "비밀번호가 맞지 않습니다.");
+          }
+          loginAttempts.delete(address);
+          for (const [key, session] of sessions) if (session.expires <= now) sessions.delete(key);
+          if (sessions.size >= 1000) sessions.delete(sessions.keys().next().value);
+          const previous = getSession(request);
+          if (previous) sessions.delete(previous.token);
+          const token = randomBytes(32).toString("hex");
+          sessions.set(token, { token, expires: now + sessionDuration, busy: false });
+          response.setHeader("Set-Cookie", sessionCookie(request, token, sessionDuration / 1000));
+          return sendJson(response, 200, { ok: true });
+        }
+        if (url.pathname === "/api/logout") {
+          const session = getSession(request);
+          if (session) sessions.delete(session.token);
+          response.setHeader("Set-Cookie", sessionCookie(request, "", 0));
+          return sendJson(response, 200, { ok: true });
+        }
+        if (["/api/portrait", "/api/validate"].includes(url.pathname)) {
+          const session = getSession(request);
+          if (!session) throw httpError(401, "이용 시간이 만료되었습니다. 비밀번호를 다시 입력해 주세요.");
+          if (session.busy) throw httpError(429, "이전 사진을 처리하고 있습니다. 잠시 후 다시 시도해 주세요.");
+          const body = await readJson(request);
+          validateImageInput(body);
+          // Check again after reading the body: two requests may arrive together.
+          if (session.busy) throw httpError(429, "이전 사진을 처리하고 있습니다. 잠시 후 다시 시도해 주세요.");
+          session.busy = true;
+          try {
+            const result = url.pathname === "/api/portrait"
+              ? await transformPortrait(body, controller.signal)
+              : await validatePortraitInput(body, controller.signal);
+            return sendJson(response, 200, result);
+          } finally { session.busy = false; }
+        }
+        throw httpError(404, "요청한 경로를 찾을 수 없습니다.");
+      }
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        response.setHeader("Allow", "GET, HEAD, POST");
+        throw httpError(405, "지원하지 않는 요청입니다.");
+      }
+      await serveStatic(url.pathname, response, request.method === "HEAD");
+    } catch (error) {
+      if (controller.signal.aborted || response.destroyed) return;
+      const status = error.status || 500;
+      if (status >= 500) console.error(`Request failed: ${status} ${error.name || "Error"}`);
+      sendJson(response, status, { error: error.status ? error.message : "서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." });
     }
+  });
+}
 
-    if (request.method === "POST" && url.pathname === "/api/auth") {
-      const body = await readJson(request);
-      if (isAuthorized(body)) return sendJson(response, 200, { ok: true });
-      return sendJson(response, 401, { ok: false, error: "비밀번호가 맞지 않습니다." });
-    }
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const server = createAppServer();
+  server.listen(port, host, () => {
+    console.log(`KYOBODT running at http://${host}:${server.address().port}`);
+    console.log(`AI_PROVIDER=${provider}`);
+  });
+}
 
-    if (request.method === "POST" && url.pathname === "/api/portrait") {
-      const body = await readJson(request);
-      requireAuthorized(body);
-      const result = await transformPortrait(body);
-      return sendJson(response, 200, result);
-    }
+function passwordMatches(password) {
+  if (typeof password !== "string" || !password || password.length > 1024) return false;
+  const digest = (value) => createHash("sha256").update(value).digest();
+  return timingSafeEqual(digest(password), digest(appPassword));
+}
 
-    if (request.method === "POST" && url.pathname === "/api/validate") {
-      const body = await readJson(request);
-      requireAuthorized(body);
-      const result = await validatePortraitInput(body);
-      return sendJson(response, 200, result);
-    }
-
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      return sendJson(response, 405, { error: "지원하지 않는 요청입니다." });
-    }
-
-    await serveStatic(url.pathname, response, request.method === "HEAD");
-  } catch (error) {
-    console.error(`[${request.method} ${request.url}]`, error.status || 500, error.message || error);
-    sendJson(response, error.status || 500, { error: error.message || "서버 오류가 발생했습니다." });
+function getSession(request) {
+  const token = (request.headers.cookie || "").split(";").map((item) => item.trim()).find((item) => item.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
+  const session = sessions.get(token);
+  if (!session || session.expires <= Date.now()) {
+    if (session) sessions.delete(token);
+    return null;
   }
-});
+  return session;
+}
 
-server.listen(port, host, () => {
-  console.log(`KYOBODT running at http://${host}:${port}`);
-  console.log(`AI_PROVIDER=${provider}`);
-});
+function sessionCookie(request, token, maxAge) {
+  const secure = process.env.NODE_ENV === "production" || request.socket.encrypted || request.headers["x-forwarded-proto"] === "https";
+  return `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? "; Secure" : ""}`;
+}
+
+function checkRequestOrigin(request) {
+  if (request.headers["sec-fetch-site"] === "cross-site") throw httpError(403, "허용되지 않은 요청입니다.");
+  if (!request.headers.origin) return;
+  try {
+    if (new URL(request.headers.origin).host === request.headers.host) return;
+  } catch { /* Invalid origins are rejected. */ }
+  throw httpError(403, "허용되지 않은 요청입니다.");
+}
 
 function getConfig() {
+  if (!appPassword) return { provider, ready: false, message: "관리자가 APP_PASSWORD를 설정해야 합니다." };
   if (provider === "openai") {
     return {
       provider: "OpenAI",
@@ -102,34 +203,27 @@ function getConfig() {
     return { provider: "Gemini", ready: true, message: "Gemini + 로컬 규격 보정 사용 가능" };
   }
 
-  return { provider: "Mock", ready: true, message: "목업 AI 사용 중" };
+  if (provider === "mock") return { provider: "Mock", ready: true, message: "체험 모드 · AI 변환 없이 저장 흐름만 확인합니다." };
+  return { provider, ready: false, message: "지원하지 않는 AI 설정입니다. 관리자에게 문의해 주세요." };
 }
 
-function isAuthorized(body) {
-  return typeof body?.password === "string" && body.password === appPassword;
-}
-
-function requireAuthorized(body) {
-  if (!isAuthorized(body)) throw httpError(401, "비밀번호가 필요합니다.");
-}
-
-async function transformPortrait(body) {
+async function transformPortrait(body, signal) {
   if (!body?.imageDataUrl) throw httpError(400, "imageDataUrl이 필요합니다.");
 
-  if (provider === "openai") return transformWithOpenAI(body);
-  if (provider === "gemini") return transformWithGemini(body);
-  if (provider === "local") return transformWithLocal(body);
+  if (provider === "openai") return transformWithOpenAI(body, signal);
+  if (provider === "gemini") return transformWithGemini(body, signal);
+  if (provider === "local") return transformWithLocal(body, signal);
   if (provider === "mock") return { provider: "Mock", imageDataUrl: body.imageDataUrl };
 
   throw httpError(400, `지원하지 않는 AI_PROVIDER입니다: ${provider}`);
 }
 
-async function validatePortraitInput(body) {
+async function validatePortraitInput(body, signal) {
   if (!body?.imageDataUrl) throw httpError(400, "imageDataUrl이 필요합니다.");
 
-  if (provider === "openai") return validateWithOpenAI(body.imageDataUrl);
-  if (provider === "gemini") return validateWithLocal(body.imageDataUrl);
-  if (provider === "local") return validateWithLocal(body.imageDataUrl);
+  if (provider === "openai") return validateWithOpenAI(body.imageDataUrl, signal);
+  if (provider === "gemini") return validateWithLocal(body.imageDataUrl, signal);
+  if (provider === "local") return validateWithLocal(body.imageDataUrl, signal);
   if (provider === "mock") {
     return {
       ok: true,
@@ -141,12 +235,13 @@ async function validatePortraitInput(body) {
   throw httpError(400, `지원하지 않는 AI_PROVIDER입니다: ${provider}`);
 }
 
-async function validateWithOpenAI(imageDataUrl) {
+async function validateWithOpenAI(imageDataUrl, signal) {
   if (!process.env.OPENAI_API_KEY) {
     throw httpError(503, "OPENAI_API_KEY를 설정한 뒤 서버를 다시 실행하세요.");
   }
 
-  const apiResponse = await fetch("https://api.openai.com/v1/responses", {
+  const apiResponse = await providerFetch("https://api.openai.com/v1/responses", {
+    signal,
     method: "POST",
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -161,7 +256,7 @@ async function validateWithOpenAI(imageDataUrl) {
             {
               type: "input_text",
               text: [
-                "Judge whether this uploaded image is suitable as input for converting into a Korean ID photo.",
+                "Judge whether this uploaded image is suitable as input for converting into a professional profile photo.",
                 "Return only compact JSON with keys: ok(boolean), message(string), reason(string).",
                 "ok should be true only when there is exactly one real human face, the face is clearly visible, not too small, not heavily obscured, not a pet/object/cartoon, and image quality is sufficient.",
                 "If not suitable, message must be a short Korean instruction telling the user what better photo to upload.",
@@ -174,27 +269,29 @@ async function validateWithOpenAI(imageDataUrl) {
     }),
   });
 
-  const payload = await apiResponse.json();
+  const payload = await providerJson(apiResponse);
   if (!apiResponse.ok) {
-    throw httpError(apiResponse.status, payload.error?.message || "OpenAI 사진 판별 실패");
+    throw httpError(502, "사진 판별 서비스에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.");
   }
 
   const text = extractResponseText(payload);
   const parsed = parseJsonObject(text);
+  requireBooleanResult(parsed);
   return {
-    ok: Boolean(parsed.ok),
+    ok: parsed.ok,
     message: parsed.message || (parsed.ok ? "변환 가능합니다." : "얼굴이 잘 보이는 사람 사진을 다시 등록하세요."),
     reason: parsed.reason || "vision_check",
   };
 }
 
-async function validateWithLocal(imageDataUrl) {
+async function validateWithLocal(imageDataUrl, signal) {
   const endpoint = localValidateEndpoint || localEndpoint;
   if (!endpoint) {
     throw httpError(503, "LOCAL_AI_VALIDATE_ENDPOINT 또는 LOCAL_AI_ENDPOINT를 설정하세요.");
   }
 
-  const localResponse = await fetch(endpoint, {
+  const localResponse = await providerFetch(endpoint, {
+    signal,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -203,19 +300,20 @@ async function validateWithLocal(imageDataUrl) {
     }),
   });
 
-  const payload = await localResponse.json();
+  const payload = await providerJson(localResponse);
   if (!localResponse.ok) {
-    throw httpError(localResponse.status, payload.error || "로컬 AI 사진 판별 실패");
+    throw httpError(502, "사진 판별 서비스가 응답하지 않습니다. 잠시 후 다시 시도해 주세요.");
   }
 
+  requireBooleanResult(payload);
   return {
-    ok: Boolean(payload.ok),
+    ok: payload.ok,
     message: payload.message || (payload.ok ? "변환 가능합니다." : "얼굴이 잘 보이는 사람 사진을 다시 등록하세요."),
     reason: payload.reason || "local_check",
   };
 }
 
-async function transformWithOpenAI({ imageDataUrl, spec, background }) {
+async function transformWithOpenAI({ imageDataUrl, spec, background }, signal) {
   if (!process.env.OPENAI_API_KEY) {
     throw httpError(503, "OPENAI_API_KEY를 설정한 뒤 서버를 다시 실행하세요.");
   }
@@ -229,7 +327,8 @@ async function transformWithOpenAI({ imageDataUrl, spec, background }) {
   form.append("quality", process.env.OPENAI_IMAGE_QUALITY || "high");
   form.append("output_format", "png");
 
-  const apiResponse = await fetch("https://api.openai.com/v1/images/edits", {
+  const apiResponse = await providerFetch("https://api.openai.com/v1/images/edits", {
+    signal,
     method: "POST",
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -237,9 +336,9 @@ async function transformWithOpenAI({ imageDataUrl, spec, background }) {
     body: form,
   });
 
-  const payload = await apiResponse.json();
+  const payload = await providerJson(apiResponse);
   if (!apiResponse.ok) {
-    throw httpError(apiResponse.status, payload.error?.message || "OpenAI 이미지 변환 실패");
+    throw httpError(502, "사진 변환 서비스에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.");
   }
 
   const item = payload.data?.[0];
@@ -253,7 +352,7 @@ async function transformWithOpenAI({ imageDataUrl, spec, background }) {
   throw httpError(502, "OpenAI 응답에 이미지 데이터가 없습니다.");
 }
 
-async function transformWithGemini({ imageDataUrl, spec, background }) {
+async function transformWithGemini({ imageDataUrl, spec, background }, signal) {
   if (!process.env.GEMINI_API_KEY) {
     throw httpError(503, "GEMINI_API_KEY를 설정한 뒤 서버를 다시 실행하세요.");
   }
@@ -262,9 +361,10 @@ async function transformWithGemini({ imageDataUrl, spec, background }) {
   }
 
   const { buffer, mime } = parseDataUrl(imageDataUrl);
-  const apiResponse = await fetch(
+  const apiResponse = await providerFetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent`,
     {
+      signal,
       method: "POST",
       headers: {
         "x-goog-api-key": process.env.GEMINI_API_KEY,
@@ -283,9 +383,9 @@ async function transformWithGemini({ imageDataUrl, spec, background }) {
     }
   );
 
-  const payload = await apiResponse.json();
+  const payload = await providerJson(apiResponse);
   if (!apiResponse.ok) {
-    throw httpError(apiResponse.status, payload.error?.message || "Gemini 이미지 변환 실패");
+    throw httpError(502, "사진 변환 서비스에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.");
   }
 
   const parts = payload.candidates?.[0]?.content?.parts || [];
@@ -303,7 +403,7 @@ async function transformWithGemini({ imageDataUrl, spec, background }) {
     spec,
     background,
     enhance: false,
-  });
+  }, signal);
   return { provider: "Gemini", imageDataUrl: refined.imageDataUrl };
 }
 
@@ -319,12 +419,13 @@ function buildGeminiPrompt() {
   ].join(" ");
 }
 
-async function transformWithLocal(body) {
+async function transformWithLocal(body, signal) {
   if (!localEndpoint) {
     throw httpError(503, "LOCAL_AI_ENDPOINT를 설정한 뒤 서버를 다시 실행하세요.");
   }
 
-  const localResponse = await fetch(localEndpoint, {
+  const localResponse = await providerFetch(localEndpoint, {
+    signal,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -336,9 +437,9 @@ async function transformWithLocal(body) {
     }),
   });
 
-  const payload = await localResponse.json();
+  const payload = await providerJson(localResponse);
   if (!localResponse.ok) {
-    throw httpError(localResponse.status, payload.error || "로컬 AI 변환 실패");
+    throw httpError(502, "사진 보정 서비스가 응답하지 않습니다. 잠시 후 다시 시도해 주세요.");
   }
 
   if (payload.imageDataUrl) return { provider: "Local AI", imageDataUrl: payload.imageDataUrl };
@@ -349,55 +450,83 @@ async function transformWithLocal(body) {
 function buildPrompt(spec = "passport", background = "#f7f9fc") {
   const ratio = spec === "square" ? "1:1" : "3:4";
   return [
-    "Transform the uploaded person photo into a professional Korean ID photo.",
+    "Transform the uploaded person photo into a professional profile photo.",
     "Preserve the person's identity and natural facial features.",
     "Use a clean studio look, centered head and shoulders, front-facing composition, neutral expression, natural skin tone, sharp focus, even lighting, no filters.",
     `Use a plain solid background close to ${background}.`,
-    `Compose for a ${ratio} ID photo crop with enough headroom and visible shoulders.`,
+    `Compose for a ${ratio} profile photo crop with enough headroom and visible shoulders.`,
     "Remove distracting background elements. Do not add text, watermark, accessories, or change the person into someone else.",
   ].join(" ");
 }
 
 async function serveStatic(pathname, response, headOnly) {
-  const rawPath = decodeURIComponent(pathname.split("?")[0]);
-  const safePath = normalize(rawPath).replace(/^[/\\]+/, "");
-  if (safePath.split(/[\\/]/).some((segment) => segment.startsWith("."))) {
-    throw httpError(403, "접근할 수 없는 경로입니다.");
-  }
-  const filePath = resolve(root, safePath === "" ? "index.html" : safePath);
-  const rootPath = resolve(root);
-  if (filePath !== rootPath && !filePath.startsWith(rootPath + sep)) {
-    throw httpError(403, "접근할 수 없는 경로입니다.");
-  }
+  let rawPath;
+  try { rawPath = decodeURIComponent(pathname); } catch { throw httpError(400, "잘못된 주소입니다."); }
+  const publicFiles = { "/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/styles.css": "styles.css" };
+  if (!Object.hasOwn(publicFiles, rawPath)) throw httpError(404, "페이지를 찾을 수 없습니다.");
+  const filePath = join(root, publicFiles[rawPath]);
   const data = await readFile(filePath);
-  response.writeHead(200, {
-    "Content-Type": mimeTypes[extname(filePath)] || "application/octet-stream",
-    "Cache-Control": "no-store",
-  });
-  if (!headOnly) response.end(data);
-  else response.end();
+  response.writeHead(200, { ...securityHeaders, "Content-Type": mimeTypes[extname(filePath)], "Content-Length": data.length });
+  response.end(headOnly ? undefined : data);
 }
 
-async function readJson(request) {
+async function readJson(request, maxBytes = 12 * 1024 * 1024) {
+  if (Number(request.headers["content-length"]) > maxBytes) throw httpError(413, "파일 용량은 8MB까지 가능합니다.");
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 18 * 1024 * 1024) throw httpError(413, "이미지 용량이 너무 큽니다.");
+    if (size > maxBytes) throw httpError(413, "파일 용량은 8MB까지 가능합니다.");
     chunks.push(chunk);
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  try {
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error();
+    return body;
+  } catch { throw httpError(400, "요청 내용을 읽을 수 없습니다."); }
+}
+
+function validateImageInput(body) {
+  parseDataUrl(body.imageDataUrl);
+  if (body.spec && !["profile", "passport", "standard", "square"].includes(body.spec)) throw httpError(400, "지원하지 않는 사진 규격입니다.");
+  if (body.background && !/^#[0-9a-f]{6}$/i.test(body.background)) throw httpError(400, "배경색 형식이 올바르지 않습니다.");
 }
 
 function parseDataUrl(dataUrl) {
-  const match = /^data:(.+?);base64,(.+)$/.exec(dataUrl);
-  if (!match) throw httpError(400, "올바른 이미지 데이터가 아닙니다.");
-  return { mime: match[1], buffer: Buffer.from(match[2], "base64") };
+  if (typeof dataUrl !== "string") throw httpError(400, "사진을 먼저 선택해 주세요.");
+  const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(dataUrl);
+  if (!match || match[2].length % 4 !== 0) throw httpError(400, "JPG, PNG, WebP 사진만 사용할 수 있습니다.");
+  const buffer = Buffer.from(match[2], "base64");
+  if (buffer.length > maxImageBytes) throw httpError(413, "파일 용량은 8MB까지 가능합니다.");
+  const mime = match[1];
+  const isPng = buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  const isJpeg = buffer[0] === 255 && buffer[1] === 216 && buffer[2] === 255;
+  const isWebp = buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP";
+  if (!(mime === "image/png" && isPng || mime === "image/jpeg" && isJpeg || mime === "image/webp" && isWebp)) throw httpError(400, "사진 파일 형식을 확인해 주세요.");
+  return { mime, buffer };
 }
 
 function sendJson(response, status, payload) {
-  response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  response.writeHead(status, { ...securityHeaders, "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(payload));
+}
+
+async function providerFetch(url, options) {
+  const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
+  try { return await fetch(url, { ...options, signal }); }
+  catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw httpError(signal.aborted ? 504 : 502, signal.aborted ? "처리 시간이 길어졌습니다. 잠시 후 다시 시도해 주세요." : "AI 서비스에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+  }
+}
+
+async function providerJson(response) {
+  try { return await response.json(); }
+  catch (error) { throw httpError(error.name === "TimeoutError" || error.name === "AbortError" ? 504 : 502, "AI 응답을 읽지 못했습니다. 다시 시도해 주세요."); }
+}
+
+function requireBooleanResult(payload) {
+  if (!payload || typeof payload.ok !== "boolean") throw httpError(502, "사진 판별 응답이 올바르지 않습니다. 다시 시도해 주세요.");
 }
 
 function extractResponseText(payload) {
@@ -413,13 +542,12 @@ function extractResponseText(payload) {
 }
 
 function parseJsonObject(text) {
+  try { return JSON.parse(text); } catch { /* Some models wrap JSON in Markdown. */ }
   try {
-    return JSON.parse(text);
-  } catch {
     const match = /\{[\s\S]*\}/.exec(text || "");
     if (match) return JSON.parse(match[0]);
-    throw httpError(502, "사진 판별 응답을 해석하지 못했습니다.");
-  }
+  } catch { /* A malformed provider response is an upstream error. */ }
+  throw httpError(502, "사진 판별 응답을 해석하지 못했습니다.");
 }
 
 function httpError(status, message) {

@@ -12,6 +12,7 @@ import io
 import re
 import threading
 import urllib.request
+import warnings
 from pathlib import Path
 
 import cv2
@@ -25,6 +26,7 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_tasks
 from mediapipe.tasks.python import vision as mp_vision
 from rembg import new_session, remove
+from image_input import MAX_IMAGE_PIXELS, decode_image_bytes
 
 app = FastAPI(title="KYOBODT Local AI")
 
@@ -44,7 +46,7 @@ if not FACE_MODEL_PATH.exists():
 
     FACE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     context = ssl.create_default_context(cafile=certifi.where())
-    with urllib.request.urlopen(FACE_MODEL_URL, context=context) as response:
+    with urllib.request.urlopen(FACE_MODEL_URL, context=context, timeout=30) as response:
         FACE_MODEL_PATH.write_bytes(response.read())
 
 FACE_DETECTOR = mp_vision.FaceDetector.create_from_options(
@@ -90,16 +92,16 @@ class TransformBody(BaseModel):
 
 
 def decode_data_url(data_url: str) -> np.ndarray:
-    match = re.match(r"^data:image/[\w.+-]+;base64,(.+)$", data_url, re.DOTALL)
-    if not match:
-        raise ValueError("올바른 이미지 데이터가 아닙니다.")
-    raw = base64.b64decode(match.group(1))
-    image = Image.open(io.BytesIO(raw))
-    # 폰 카메라의 EXIF 회전 정보를 반영해 사진을 바로 세운다
-    image = ImageOps.exif_transpose(image).convert("RGB")
-    # 폰카 원본은 매우 클 수 있으므로 처리 속도를 위해 긴 변 1600px로 제한
-    image.thumbnail((1600, 1600), Image.LANCZOS)
-    return np.array(image)
+    raw = decode_image_bytes(data_url)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        with Image.open(io.BytesIO(raw)) as source:
+            if source.width * source.height > MAX_IMAGE_PIXELS:
+                raise ValueError("사진 해상도가 너무 큽니다. 2400만 화소 이하로 줄여주세요.")
+            # EXIF 회전을 반영하고 메타데이터 없는 RGB 배열로만 처리한다.
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+            return np.array(image)
 
 
 def encode_png_data_url(rgb: np.ndarray) -> str:
