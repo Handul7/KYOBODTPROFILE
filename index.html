@@ -1,86 +1,79 @@
 <!doctype html>
 <html lang="ko">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>KYOBODT</title>
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <main class="app">
-      <header class="topbar">
-        <strong class="brand">KYOBO<span>DT</span></strong>
-      </header>
-
-      <section class="purpose">
-        <strong>프로필 사진 자동 변환</strong>
-        <p>얼굴이 잘 보이는 정면 사진을 올리면 사진관 스타일의 프로필 사진으로 변환합니다.</p>
-      </section>
-
-      <section class="workspace">
-        <section class="stage-wrap" aria-label="사진 미리보기">
-          <canvas id="photoCanvas" width="900" height="1200"></canvas>
-          <label id="uploadDrop" class="upload-drop">
-            <span class="upload-icon">＋</span>
-            <strong>사진 올리기</strong>
-            <span class="upload-hint">갤러리 또는 카메라</span>
-          </label>
-        </section>
-      </section>
-
-      <section class="status-panel" aria-live="polite">
-        <p id="providerStatus">AI 서버 확인 중</p>
-        <p id="validationStatus">사진을 올리면 자동으로 확인하고 변환합니다.</p>
-        <button id="downloadBtn" class="primary hidden" type="button" disabled>PNG 저장</button>
-      </section>
-
-      <section class="examples" aria-label="사진 예시">
-        <article class="example-card good">
-          <div class="sample-face" aria-hidden="true">
-            <span class="head"></span>
-            <span class="neck"></span>
-            <span class="shoulder"></span>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0646a5">
+  <meta name="description" content="사진 한 장으로 완성하는 KYOBODT 프로필 스튜디오. 사진을 확인하고, 배경을 고르고, 새로운 프로필을 저장하세요.">
+  <title>KYOBODT · 프로필 스튜디오</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='12' fill='%230646a5'/%3E%3Ctext x='24' y='34' text-anchor='middle' font-size='32' fill='white' font-family='sans-serif'%3EK%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">사진 작업으로 이동</a>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="KYOBODT 프로필 스튜디오 홈"><span class="brand-mark" aria-hidden="true">K</span><span>KYOBODT<small>교보생명 · PROFILE STUDIO</small></span></a>
+    <button id="logoutButton" class="text-button" type="button" hidden>이용 종료</button>
+    <span class="header-note">나를 소개하는 첫 장면</span>
+  </header>
+  <main>
+    <section class="intro" aria-labelledby="pageTitle">
+      <p class="eyebrow">YOUR NEXT FIRST IMPRESSION</p>
+      <h1 id="pageTitle">사진 한 장,<br class="mobile-break"> 새로운 프로필.</h1>
+      <p class="intro-copy">평소의 내 모습을 단정한 스튜디오 프로필로.<br>사진을 고르고, 결과를 확인한 뒤 간편하게 저장하세요.</p>
+      <p id="offlineNotice" class="offline-notice" role="status" hidden>인터넷 연결이 끊겼어요. 사진은 화면에 유지됩니다.</p>
+    </section>
+    <section id="workspace" class="workspace" aria-label="프로필 사진 만들기">
+      <div class="preview-card">
+        <div class="card-topline"><span class="section-label">PHOTO PREVIEW</span><span id="previewBadge" class="badge">사진을 기다리고 있어요</span></div>
+        <div id="dropZone" class="photo-stage">
+          <canvas id="photoCanvas" width="708" height="944" role="img" aria-label="선택한 사진과 변환 결과 미리보기" hidden></canvas>
+          <button id="uploadButton" class="upload-target" type="button" aria-describedby="fileHelp">
+            <span class="portrait-art" aria-hidden="true"><span class="portrait-head"></span><span class="portrait-body"></span><span class="portrait-plus">+</span></span>
+            <strong>어떤 모습으로 소개할까요?</strong>
+            <span>클릭해서 사진 선택</span>
+            <span class="drop-hint">또는 여기에 사진을 놓아주세요</span>
+          </button>
+          <span class="photo-corner top-left" aria-hidden="true"></span><span class="photo-corner bottom-right" aria-hidden="true"></span>
+        </div>
+        <div class="preview-tools"><button id="cameraButton" class="text-button" type="button">카메라로 촬영</button><button id="rotateButton" class="text-button" type="button" hidden>사진 90° 회전 ↻</button></div>
+        <div class="preview-bottom">
+          <div id="compareControls" class="segmented" aria-label="사진 비교" hidden>
+            <button id="originalButton" type="button" aria-pressed="false">원본</button>
+            <button id="resultButton" type="button" aria-pressed="true">변환 결과</button>
           </div>
-          <strong>좋은 사진</strong>
-          <p>정면, 밝은 얼굴</p>
-        </article>
-        <article class="example-card">
-          <div class="sample-face far" aria-hidden="true">
-            <span class="head"></span>
-            <span class="neck"></span>
-            <span class="shoulder"></span>
-          </div>
-          <strong>얼굴이 작음</strong>
-          <p>가까이 촬영</p>
-        </article>
-        <article class="example-card">
-          <div class="sample-face blocked" aria-hidden="true">
-            <span class="head"></span>
-            <span class="bar"></span>
-            <span class="neck"></span>
-            <span class="shoulder"></span>
-          </div>
-          <strong>가려짐</strong>
-          <p>얼굴 전체 노출</p>
-        </article>
-      </section>
-
-      <input id="galleryInput" class="file-input" type="file" accept="image/*" />
-
-      <dialog id="passwordDialog" class="password-dialog">
-        <form id="passwordForm" method="dialog">
-          <strong>비밀번호 확인</strong>
-          <p>사진 업로드와 AI 변환을 사용하려면 비밀번호를 입력하세요.</p>
-          <input id="passwordInput" type="password" autocomplete="current-password" placeholder="비밀번호" />
-          <span id="passwordError" class="password-error" aria-live="polite"></span>
-          <div class="dialog-actions">
-            <button id="passwordCancel" class="secondary" type="button">취소</button>
-            <button class="primary" type="submit">확인</button>
-          </div>
-        </form>
-      </dialog>
-    </main>
-
-    <script src="./app.js"></script>
-  </body>
+          <p id="fileInfo" class="file-info">나만의 프로필을 시작해 보세요</p>
+          <button id="changeButton" class="text-button" type="button" hidden>사진 변경</button>
+        </div>
+      </div>
+      <div class="controls-card">
+        <div class="control-heading"><span class="eyebrow">3 STEPS, ONE NEW PROFILE</span><h2>프로필을 완성해 볼까요?</h2></div>
+        <ol class="steps">
+          <li id="stepUpload" class="step current"><span class="step-number" aria-hidden="true">01</span><div><h3>마음에 드는 사진 선택</h3><p>얼굴이 잘 보이는 1인 사진을 준비해 주세요.</p><p id="fileHelp" class="format-note">JPG · PNG · WebP / 최대 8MB</p></div></li>
+          <li id="stepConvert" class="step"><span class="step-number" aria-hidden="true">02</span><div><h3>배경 선택 후 프로필 만들기</h3><fieldset class="background-options"><legend class="sr-only">프로필 배경색</legend><label><input type="radio" name="background" value="#d9dce1" checked><span class="swatch gray" aria-hidden="true"></span>그레이</label><label><input type="radio" name="background" value="#ffffff"><span class="swatch white" aria-hidden="true"></span>화이트</label><label><input type="radio" name="background" value="#e6edf5"><span class="swatch blue" aria-hidden="true"></span>블루</label></fieldset></div></li>
+          <li id="stepSave" class="step"><span class="step-number" aria-hidden="true">03</span><div><h3>원본과 비교하고 저장</h3><p>3:4 비율 · 708 × 944px · PNG · JPG 이미지</p></div></li>
+        </ol>
+        <div id="statusPanel" class="status-panel" role="status" aria-live="polite" aria-atomic="true"><span id="statusIcon" class="status-dot" aria-hidden="true"></span><p id="statusText">사진을 선택하면 여기서 다음 단계를 안내할게요.</p></div>
+        <button id="convertButton" class="primary-button" type="button" disabled>프로필 만들기 <span aria-hidden="true">↗</span></button>
+        <div id="exportOptions" class="export-options" hidden><label for="downloadFormat">저장 형식</label><select id="downloadFormat"><option value="png">PNG · 무손실 저장</option><option value="jpeg">JPG · 가벼운 파일</option></select></div>
+        <button id="downloadButton" class="primary-button download-button" type="button" hidden>완성한 프로필 저장 <span aria-hidden="true">↓</span></button>
+        <button id="shareButton" class="secondary-button share-button" type="button" hidden>사진 공유 / 기기에 저장</button>
+        <button id="editAgainButton" class="text-button edit-again" type="button" hidden>이 사진으로 배경을 바꿔 다시 만들기</button>
+        <div class="secondary-actions"><button id="cancelButton" class="text-button" type="button" hidden>처리 취소</button><button id="resetButton" class="text-button" type="button" hidden>처음부터 다시</button></div>
+        <p id="privacyNote" class="privacy-note">사진 선택만으로는 서버에 전송되지 않아요. ‘프로필 만들기’를 누르면 사진 판별과 변환을 시작합니다.</p>
+        <div class="provider-line"><span id="providerStatus">서비스 연결 확인 중…</span><button id="retryConfigButton" class="text-button" type="button" hidden>다시 연결</button></div>
+      </div>
+    </section>
+    <section class="photo-guide" aria-labelledby="guideTitle"><div><span class="eyebrow">A BETTER START</span><h2 id="guideTitle">이런 사진이면 더 좋아요</h2></div><ul><li><span aria-hidden="true">01</span><div><strong>얼굴은 정면에 가깝게</strong><p>한 사람의 얼굴과 어깨가 잘 보이는 사진</p></div></li><li><span aria-hidden="true">02</span><div><strong>밝고 선명한 곳에서</strong><p>자연스러운 빛, 흔들림 없는 초점</p></div></li><li><span aria-hidden="true">03</span><div><strong>가리는 물건 없이</strong><p>마스크나 짙은 선글라스 없는 모습</p></div></li></ul></section>
+    <p class="result-note">AI 결과는 원본과 다를 수 있어요. 얼굴과 세부 표현을 확인한 뒤 사용해 주세요. 이 서비스는 프로필용이며, 여권·신분증 사진 규격을 보장하지 않습니다.</p>
+  </main>
+  <footer><strong>KYOBODT</strong><span>당신다운 첫인상을 함께 만듭니다.</span></footer>
+  <input id="galleryInput" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+  <input id="cameraInput" type="file" accept="image/*" capture="user" hidden>
+  <div id="dialogBackdrop" class="dialog-backdrop" hidden></div>
+  <dialog id="passwordDialog" aria-labelledby="passwordTitle" aria-describedby="passwordDescription">
+    <form id="passwordForm"><span class="eyebrow">WELCOME TO PROFILE STUDIO</span><h2 id="passwordTitle">이용 비밀번호를 입력해 주세요</h2><p id="passwordDescription">사진을 변환하려면 서비스 이용 확인이 필요해요.</p><label for="passwordInput">비밀번호</label><input id="passwordInput" type="password" autocomplete="current-password" maxlength="1024" required><p id="passwordError" class="field-error" role="alert"></p><div class="dialog-actions"><button id="passwordCancel" class="secondary-button" type="button">취소</button><button id="passwordSubmit" class="primary-button" type="submit">확인</button></div></form>
+  </dialog>
+</body>
 </html>

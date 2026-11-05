@@ -11,49 +11,44 @@ import base64
 import io
 import re
 import threading
-import urllib.request
-from pathlib import Path
+import warnings
+from contextlib import asynccontextmanager
+from typing import Literal
 
 import cv2
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from PIL import Image, ImageOps
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import mediapipe as mp
-from mediapipe.tasks import python as mp_tasks
-from mediapipe.tasks.python import vision as mp_vision
-from rembg import new_session, remove
+from rembg import remove
+from image_input import MAX_IMAGE_PIXELS, decode_image_bytes
+from model_runtime import ModelRuntime, SetupError
 
-app = FastAPI(title="KYOBODT Local AI")
-
-# 사람 전신/상반신 분리에 특화된 세그멘테이션 모델 (최초 1회 자동 다운로드, ~170MB)
-REMBG_SESSION = new_session("u2net_human_seg")
-
-# MediaPipe Tasks 얼굴 감지 모델 (최초 1회 자동 다운로드, ~230KB)
-FACE_MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/face_detector/"
-    "blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
-)
-FACE_MODEL_PATH = Path(__file__).parent / "models" / "blaze_face_short_range.tflite"
-if not FACE_MODEL_PATH.exists():
-    import ssl
-
-    import certifi
-
-    FACE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    context = ssl.create_default_context(cafile=certifi.where())
-    with urllib.request.urlopen(FACE_MODEL_URL, context=context) as response:
-        FACE_MODEL_PATH.write_bytes(response.read())
-
-FACE_DETECTOR = mp_vision.FaceDetector.create_from_options(
-    mp_vision.FaceDetectorOptions(
-        base_options=mp_tasks.BaseOptions(model_asset_path=str(FACE_MODEL_PATH)),
-        min_detection_confidence=0.6,
-    )
-)
+models = ModelRuntime()
 FACE_DETECTOR_LOCK = threading.Lock()
+TRANSFORM_LOCK = threading.Lock()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    # Startup is observable; cached model loading does not block /health.
+    models.start()
+    yield
+
+
+app = FastAPI(title="KYOBODT Local AI", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    length = request.headers.get("content-length")
+    if length and (not length.isdigit() or int(length) > 12 * 1024 * 1024):
+        return JSONResponse(status_code=413, content={"error": "요청 용량이 너무 큽니다."})
+    return await call_next(request)
+
 
 # 판별 기준값
 MIN_FACE_AREA_RATIO = 0.03   # 얼굴이 사진 면적의 3% 미만이면 너무 작음
@@ -75,31 +70,31 @@ CROWN_MARGIN = 0.12       # 정수리 위 여백 / 사진 세로
 
 
 class ValidateBody(BaseModel):
-    imageDataUrl: str
+    imageDataUrl: str = Field(max_length=12 * 1024 * 1024)
     task: str | None = None
 
 
 class TransformBody(BaseModel):
-    imageDataUrl: str
+    imageDataUrl: str = Field(max_length=12 * 1024 * 1024)
     prompt: str | None = None
-    spec: str | None = "passport"
-    background: str | None = "#f7f9fc"
+    spec: Literal["profile", "passport", "standard", "square"] = "profile"
+    background: str = Field(default="#d9dce1", pattern=r"^#[0-9a-fA-F]{6}$")
     # False면 색·조명·피부 보정을 건너뛰고 배경 교체와 규격 크롭만 수행
     # (생성형 모델 결과물을 규격에 맞출 때 사용)
     enhance: bool = True
 
 
 def decode_data_url(data_url: str) -> np.ndarray:
-    match = re.match(r"^data:image/[\w.+-]+;base64,(.+)$", data_url, re.DOTALL)
-    if not match:
-        raise ValueError("올바른 이미지 데이터가 아닙니다.")
-    raw = base64.b64decode(match.group(1))
-    image = Image.open(io.BytesIO(raw))
-    # 폰 카메라의 EXIF 회전 정보를 반영해 사진을 바로 세운다
-    image = ImageOps.exif_transpose(image).convert("RGB")
-    # 폰카 원본은 매우 클 수 있으므로 처리 속도를 위해 긴 변 1600px로 제한
-    image.thumbnail((1600, 1600), Image.LANCZOS)
-    return np.array(image)
+    raw = decode_image_bytes(data_url)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        with Image.open(io.BytesIO(raw)) as source:
+            if source.width * source.height > MAX_IMAGE_PIXELS:
+                raise ValueError("사진 해상도가 너무 큽니다. 2400만 화소 이하로 줄여주세요.")
+            # EXIF 회전을 반영하고 메타데이터 없는 RGB 배열로만 처리한다.
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+            return np.array(image)
 
 
 def encode_png_data_url(rgb: np.ndarray) -> str:
@@ -120,7 +115,7 @@ def detect_faces(rgb: np.ndarray) -> list[dict]:
     """얼굴 목록을 픽셀 좌표 bbox로 반환한다."""
     image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
     with FACE_DETECTOR_LOCK:
-        result = FACE_DETECTOR.detect(image)
+        result = models.get()["detector"].detect(image)
     faces = []
     for detection in result.detections:
         box = detection.bounding_box
@@ -233,7 +228,7 @@ def replace_background(rgb: np.ndarray, bg_color: tuple[int, int, int]) -> np.nd
     """rembg로 사람만 분리해 단색 배경 위에 합성한다."""
     rgba = remove(
         Image.fromarray(rgb),
-        session=REMBG_SESSION,
+        session=models.get()["background"],
         post_process_mask=True,
     )
     person = np.array(rgba).astype(np.float32)
@@ -285,44 +280,75 @@ def crop_to_spec(
     return cv2.resize(canvas, (out_w, out_h), interpolation=cv2.INTER_LANCZOS4)
 
 
+def unavailable():
+    health = models.status()
+    if not health["ready"]:
+        return JSONResponse(status_code=503, content={"error": health["message"], "code": health["code"] or "models_loading"})
+    return None
+
+
 @app.post("/validate")
 def validate(body: ValidateBody):
+    pending = unavailable()
+    if pending:
+        return pending
     try:
         rgb = decode_data_url(body.imageDataUrl)
     except Exception:
-        return JSONResponse(status_code=400, content={"error": "이미지를 읽지 못했습니다."})
-
-    faces = detect_faces(rgb)
-    if len(faces) == 0:
-        return {"ok": False, "message": "얼굴을 찾지 못했습니다. 정면 얼굴이 잘 보이는 사진을 올려주세요.", "reason": "no_face"}
-    if len(faces) > 1:
-        return {"ok": False, "message": "여러 명이 감지되었습니다. 한 명만 나온 사진을 올려주세요.", "reason": "multiple_faces"}
-
-    ok, message, reason = check_quality(rgb, faces[0])
-    return {"ok": ok, "message": message, "reason": reason}
+        return JSONResponse(status_code=400, content={"error": "이미지를 읽지 못했습니다. JPG, PNG, WebP 형식을 확인해 주세요."})
+    try:
+        faces = detect_faces(rgb)
+        if len(faces) == 0:
+            return {"ok": False, "message": "얼굴을 찾지 못했습니다. 정면 얼굴이 잘 보이는 사진을 올려주세요.", "reason": "no_face"}
+        if len(faces) > 1:
+            return {"ok": False, "message": "여러 명이 감지되었습니다. 한 명만 나온 사진을 올려주세요.", "reason": "multiple_faces"}
+        ok, message, reason = check_quality(rgb, faces[0])
+        return {"ok": ok, "message": message, "reason": reason}
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "로컬 얼굴 판별에 실패했습니다. 모델 상태를 확인해 주세요."})
 
 
 @app.post("/transform")
 def transform(body: TransformBody):
+    pending = unavailable()
+    if pending:
+        return pending
+    if not TRANSFORM_LOCK.acquire(blocking=False):
+        return JSONResponse(status_code=429, content={"error": "다른 사진을 처리하고 있습니다. 잠시 후 다시 시도해 주세요."})
     try:
-        rgb = decode_data_url(body.imageDataUrl)
+        try:
+            rgb = decode_data_url(body.imageDataUrl)
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "이미지를 읽지 못했습니다."})
+        # Never silently crop an arbitrary region or another person's face.
+        faces = detect_faces(rgb)
+        if len(faces) != 1:
+            return JSONResponse(status_code=422, content={"error": "한 사람의 얼굴이 분명히 보이는 사진이 필요합니다.", "code": "single_face_required"})
+        bg_color = parse_hex_color(body.background)
+        corrected = enhance_lighting(auto_white_balance(rgb)) if body.enhance else rgb
+        face = faces[0]
+        retouched = smooth_skin(corrected, face) if body.enhance else corrected
+        composed = replace_background(retouched, bg_color)
+        result = crop_to_spec(composed, face, body.spec, bg_color)
+        return {"imageDataUrl": encode_png_data_url(result)}
     except Exception:
-        return JSONResponse(status_code=400, content={"error": "이미지를 읽지 못했습니다."})
-
-    bg_color = parse_hex_color(body.background)
-
-    corrected = enhance_lighting(auto_white_balance(rgb)) if body.enhance else rgb
-
-    faces = detect_faces(corrected)
-    face = faces[0] if faces else None
-
-    retouched = smooth_skin(corrected, face) if body.enhance else corrected
-    composed = replace_background(retouched, bg_color)
-    result = crop_to_spec(composed, face, body.spec or "passport", bg_color)
-
-    return {"imageDataUrl": encode_png_data_url(result)}
+        return JSONResponse(status_code=503, content={"error": "로컬 사진 보정에 실패했습니다. 모델 상태를 확인하고 다시 시도해 주세요."})
+    finally:
+        TRANSFORM_LOCK.release()
 
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return models.status()
+
+
+@app.get("/ready")
+def ready():
+    status = models.status()
+    return JSONResponse(status_code=200 if status["ready"] else 503, content=status)
+
+
+@app.post("/warmup")
+def warmup():
+    models.start()
+    return models.status()

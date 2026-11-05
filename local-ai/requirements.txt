@@ -1,8 +1,11 @@
-fastapi>=0.110
-uvicorn>=0.29
-rembg>=2.0.57
-onnxruntime>=1.17
-mediapipe>=0.10.14
-opencv-python-headless>=4.9
-pillow>=10.3
-numpy>=1.26,<2
+# CPU runtime tested with Python 3.11; Python 3.11-3.13 recommended.
+# NumPy 2 is required by current rembg. Do not combine multiple cv2 packages.
+fastapi==0.162.0
+uvicorn==0.54.0
+rembg[cpu]==2.0.86
+mediapipe==1.2.2
+opencv-contrib-python>=4.13,<6
+onnxruntime==1.31.1
+pillow==13.0.0
+numpy>=2.3,<3
+certifi>=2026.1.4
