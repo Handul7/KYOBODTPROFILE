@@ -11,11 +11,12 @@ loadDotEnv();
 const port = Number(process.env.PORT || 5173);
 const host = process.env.HOST || "0.0.0.0";
 const provider = process.env.AI_PROVIDER || (process.env.OPENAI_API_KEY ? "openai" : "local");
-const openaiModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1.5";
-const openaiVisionModel = process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini";
-const geminiModel = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+const openaiModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2.5-flare";
+const openaiVisionModel = process.env.OPENAI_VISION_MODEL || "gpt-6-luna";
+const geminiModel = process.env.GEMINI_IMAGE_MODEL || "gemini-nano-banana-2.1";
 const localEndpoint = process.env.LOCAL_AI_ENDPOINT || "";
-const localValidateEndpoint = process.env.LOCAL_AI_VALIDATE_ENDPOINT || "";
+const localValidateEndpoint = process.env.LOCAL_AI_VALIDATE_ENDPOINT || derivedLocalEndpoint("/validate");
+const localHealthEndpoint = process.env.LOCAL_AI_HEALTH_ENDPOINT || derivedLocalEndpoint("/health");
 const appPassword = process.env.APP_PASSWORD || (process.env.NODE_ENV === "production" ? "" : "kyobo");
 const maxImageBytes = 8 * 1024 * 1024;
 const sessions = new Map();
@@ -52,7 +53,7 @@ export function createAppServer() {
         return sendJson(response, 200, { ok: true });
       }
       if (request.method === "GET" && url.pathname === "/api/config") {
-        return sendJson(response, 200, { ...getConfig(), maxImageBytes });
+        return sendJson(response, 200, { ...await getConfig(), maxImageBytes });
       }
       if (request.method === "GET" && url.pathname === "/api/session") {
         return sendJson(response, 200, { authenticated: Boolean(getSession(request)) });
@@ -171,40 +172,45 @@ function checkRequestOrigin(request) {
   throw httpError(403, "허용되지 않은 요청입니다.");
 }
 
-function getConfig() {
-  if (!appPassword) return { provider, ready: false, message: "관리자가 APP_PASSWORD를 설정해야 합니다." };
+function configurationWarnings() {
+  const warnings = [];
+  if (provider === "openai" && /^gpt-image-1(?:\.5|-mini)?(?:-|$)/.test(openaiModel)) warnings.push("기존 GPT Image 모델의 종료 일정을 확인하고 OPENAI_IMAGE_MODEL을 갱신하세요 (1.5/mini: 2026-12-01).");
+  if (provider === "openai" && /^gpt-4\.1-mini(?:-|$)/.test(openaiVisionModel)) warnings.push("gpt-4.1-mini 종료 예정: 2027-01-14. OPENAI_VISION_MODEL을 갱신하세요.");
+  if (provider === "gemini" && geminiModel.includes("preview")) warnings.push("Gemini preview 모델의 종료 일정을 확인하세요. 안정 버전 사용을 권장합니다.");
+  return warnings;
+}
+
+function derivedLocalEndpoint(pathname) {
+  try { return new URL(pathname, localEndpoint).href; } catch { return ""; }
+}
+
+export async function getConfig() {
+  const base = { provider: provider === "openai" ? "OpenAI" : provider === "gemini" ? "Gemini" : provider === "local" ? "Local AI" : "Mock", ready: false,
+    model: provider === "openai" ? openaiModel : provider === "gemini" ? geminiModel : null,
+    status: "missing_configuration", warnings: configurationWarnings(), checkedAt: new Date().toISOString() };
+  if (!appPassword) return { ...base, message: "관리자가 APP_PASSWORD를 설정해야 합니다." };
+  if (provider === "mock") return { ...base, ready: true, status: "mock", message: "체험 모드 · AI 변환 없이 저장 흐름만 확인합니다." };
+  if (!["openai", "gemini", "local"].includes(provider)) return { ...base, provider, message: "지원하지 않는 AI 설정입니다. 관리자에게 문의해 주세요." };
   if (provider === "openai") {
-    return {
-      provider: "OpenAI",
-      ready: Boolean(process.env.OPENAI_API_KEY),
-      message: process.env.OPENAI_API_KEY
-        ? "OpenAI 사용 가능"
-        : "OPENAI_API_KEY가 필요합니다.",
-    };
+    if (!process.env.OPENAI_API_KEY) return { ...base, message: "OPENAI_API_KEY가 필요합니다." };
+    return { ...base, ready: true, status: "configured", message: `${openaiModel} 설정됨 · API 연결과 이용 한도는 변환 시 확인합니다.` };
   }
-
-  if (provider === "local") {
-    return {
-      provider: "Local AI",
-      ready: Boolean(localEndpoint),
-      message: localEndpoint
-        ? "로컬 AI 사용 가능"
-        : "LOCAL_AI_ENDPOINT가 필요합니다.",
-    };
-  }
-
-  if (provider === "gemini") {
-    if (!process.env.GEMINI_API_KEY) {
-      return { provider: "Gemini", ready: false, message: "GEMINI_API_KEY가 필요합니다." };
+  if (provider === "gemini" && !process.env.GEMINI_API_KEY) return { ...base, message: "GEMINI_API_KEY가 필요합니다." };
+  if (!localEndpoint || !localHealthEndpoint || !localValidateEndpoint) return { ...base, message: "로컬 AI 주소를 설정해야 합니다." };
+  try {
+    const response = await fetch(localHealthEndpoint, { signal: AbortSignal.timeout(2500), headers: { Accept: "application/json" } });
+    const health = await response.json();
+    if (!response.ok || typeof health.ready !== "boolean") throw new Error("Invalid local health response");
+    if (!health.ready) {
+      const loading = health.state === "loading";
+      return { ...base, status: loading ? "loading" : "unavailable", localReady: false,
+        message: loading ? "로컬 AI 모델을 준비하고 있습니다. 잠시 후 다시 연결해 주세요." : health.code === "missing_models" ? "로컬 AI 모델 준비가 필요합니다. 관리자에게 문의해 주세요." : "로컬 AI 모델을 사용할 수 없습니다. 관리자에게 문의해 주세요." };
     }
-    if (!localEndpoint) {
-      return { provider: "Gemini", ready: false, message: "규격 보정용 LOCAL_AI_ENDPOINT가 필요합니다." };
-    }
-    return { provider: "Gemini", ready: true, message: "Gemini + 로컬 규격 보정 사용 가능" };
+    return { ...base, ready: true, status: provider === "local" ? "ready" : "configured", localReady: true,
+      message: provider === "local" ? "로컬 얼굴 판별·사진 보정 준비 완료" : `${geminiModel} 설정됨 · 로컬 보정 준비 완료 · 외부 API는 변환 시 확인합니다.` };
+  } catch {
+    return { ...base, status: "unavailable", localReady: false, message: "로컬 AI 서버에 연결되지 않습니다. 실행 상태와 주소를 확인해 주세요." };
   }
-
-  if (provider === "mock") return { provider: "Mock", ready: true, message: "체험 모드 · AI 변환 없이 저장 흐름만 확인합니다." };
-  return { provider, ready: false, message: "지원하지 않는 AI 설정입니다. 관리자에게 문의해 주세요." };
 }
 
 async function transformPortrait(body, signal) {
@@ -249,6 +255,10 @@ async function validateWithOpenAI(imageDataUrl, signal) {
     },
     body: JSON.stringify({
       model: openaiVisionModel,
+      store: false,
+      max_output_tokens: 800,
+      ...(/^gpt-6-luna(?:-|$)/.test(openaiVisionModel) ? { reasoning: { effort: "none" } }
+        : /^gpt-5-nano(?:-|$)/.test(openaiVisionModel) ? { reasoning: { effort: "low" } } : {}),
       input: [
         {
           role: "user",
@@ -321,7 +331,9 @@ async function transformWithOpenAI({ imageDataUrl, spec, background }, signal) {
   const { buffer, mime } = parseDataUrl(imageDataUrl);
   const form = new FormData();
   form.append("model", openaiModel);
-  form.append("image", new Blob([buffer], { type: mime }), "portrait-input.png");
+  form.append("image", new Blob([buffer], { type: mime }), `portrait-input.${mime === "image/jpeg" ? "jpg" : mime.split("/")[1]}`);
+  // Newer GPT Image models always use high fidelity and reject this legacy option.
+  if (["gpt-image-1", "gpt-image-1.5"].includes(openaiModel)) form.append("input_fidelity", "high");
   form.append("prompt", buildPrompt(spec, background));
   form.append("size", spec === "square" ? "1024x1024" : "1024x1536");
   form.append("quality", process.env.OPENAI_IMAGE_QUALITY || "high");
@@ -343,11 +355,9 @@ async function transformWithOpenAI({ imageDataUrl, spec, background }, signal) {
 
   const item = payload.data?.[0];
   if (item?.b64_json) {
-    return { provider: "OpenAI", imageDataUrl: `data:image/png;base64,${item.b64_json}` };
+    return generatedResult("OpenAI", `data:image/png;base64,${item.b64_json}`);
   }
-  if (item?.url) {
-    return { provider: "OpenAI", imageUrl: item.url };
-  }
+  
 
   throw httpError(502, "OpenAI 응답에 이미지 데이터가 없습니다.");
 }
@@ -371,6 +381,7 @@ async function transformWithGemini({ imageDataUrl, spec, background }, signal) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
         contents: [
           {
             parts: [
@@ -411,7 +422,7 @@ function buildGeminiPrompt() {
   return [
     "Retake this photo as a professional Korean studio profile portrait for a job application.",
     "Preserve the person's identity exactly: same face, same facial features, same hairstyle, and the same clothing they are wearing.",
-    "Turn the head and body to face the camera directly, eyes looking straight at the camera, natural relaxed expression with a slight smile.",
+    "Keep the original head pose, expression, facial proportions, skin texture and distinguishing details. Do not reshape the face, change age, or invent a smile.",
     "Recompose as a centered head-and-shoulders bust shot with the head upright.",
     "Replace the environment with a plain solid light gray studio background and soft, even, flattering studio lighting with no harsh shadows or color cast on the face.",
     "Remove any other people, hands, phones, or distracting objects.",
@@ -442,8 +453,8 @@ async function transformWithLocal(body, signal) {
     throw httpError(502, "사진 보정 서비스가 응답하지 않습니다. 잠시 후 다시 시도해 주세요.");
   }
 
-  if (payload.imageDataUrl) return { provider: "Local AI", imageDataUrl: payload.imageDataUrl };
-  if (payload.b64_json) return { provider: "Local AI", imageDataUrl: `data:image/png;base64,${payload.b64_json}` };
+  if (payload.imageDataUrl) return generatedResult("Local AI", payload.imageDataUrl);
+  if (payload.b64_json) return generatedResult("Local AI", `data:image/png;base64,${payload.b64_json}`);
   throw httpError(502, "로컬 AI 응답에 이미지 데이터가 없습니다.");
 }
 
@@ -451,8 +462,8 @@ function buildPrompt(spec = "passport", background = "#f7f9fc") {
   const ratio = spec === "square" ? "1:1" : "3:4";
   return [
     "Transform the uploaded person photo into a professional profile photo.",
-    "Preserve the person's identity and natural facial features.",
-    "Use a clean studio look, centered head and shoulders, front-facing composition, neutral expression, natural skin tone, sharp focus, even lighting, no filters.",
+    "Preserve the person's identity, original expression, facial proportions, skin texture and distinguishing details exactly. Do not reshape or regenerate the face.",
+    "Use a clean studio look, centered head and shoulders, original expression and head pose, natural skin tone, sharp focus, even lighting, no filters.",
     `Use a plain solid background close to ${background}.`,
     `Compose for a ${ratio} profile photo crop with enough headroom and visible shoulders.`,
     "Remove distracting background elements. Do not add text, watermark, accessories, or change the person into someone else.",
@@ -504,6 +515,12 @@ function parseDataUrl(dataUrl) {
   const isWebp = buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP";
   if (!(mime === "image/png" && isPng || mime === "image/jpeg" && isJpeg || mime === "image/webp" && isWebp)) throw httpError(400, "사진 파일 형식을 확인해 주세요.");
   return { mime, buffer };
+}
+
+function generatedResult(providerName, dataUrl) {
+  try { parseDataUrl(dataUrl); }
+  catch { throw httpError(502, "AI가 올바른 이미지 파일을 반환하지 않았습니다. 다시 시도해 주세요."); }
+  return { provider: providerName, imageDataUrl: dataUrl };
 }
 
 function sendJson(response, status, payload) {

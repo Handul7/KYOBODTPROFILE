@@ -22,6 +22,7 @@
       <p class="eyebrow">YOUR NEXT FIRST IMPRESSION</p>
       <h1 id="pageTitle">사진 한 장,<br class="mobile-break"> 새로운 프로필.</h1>
       <p class="intro-copy">평소의 내 모습을 단정한 스튜디오 프로필로.<br>사진을 고르고, 결과를 확인한 뒤 간편하게 저장하세요.</p>
+      <p id="offlineNotice" class="offline-notice" role="status" hidden>인터넷 연결이 끊겼어요. 사진은 화면에 유지됩니다.</p>
     </section>
     <section id="workspace" class="workspace" aria-label="프로필 사진 만들기">
       <div class="preview-card">
@@ -36,6 +37,7 @@
           </button>
           <span class="photo-corner top-left" aria-hidden="true"></span><span class="photo-corner bottom-right" aria-hidden="true"></span>
         </div>
+        <div class="preview-tools"><button id="cameraButton" class="text-button" type="button">카메라로 촬영</button><button id="rotateButton" class="text-button" type="button" hidden>사진 90° 회전 ↻</button></div>
         <div class="preview-bottom">
           <div id="compareControls" class="segmented" aria-label="사진 비교" hidden>
             <button id="originalButton" type="button" aria-pressed="false">원본</button>
@@ -50,11 +52,14 @@
         <ol class="steps">
           <li id="stepUpload" class="step current"><span class="step-number" aria-hidden="true">01</span><div><h3>마음에 드는 사진 선택</h3><p>얼굴이 잘 보이는 1인 사진을 준비해 주세요.</p><p id="fileHelp" class="format-note">JPG · PNG · WebP / 최대 8MB</p></div></li>
           <li id="stepConvert" class="step"><span class="step-number" aria-hidden="true">02</span><div><h3>배경 선택 후 프로필 만들기</h3><fieldset class="background-options"><legend class="sr-only">프로필 배경색</legend><label><input type="radio" name="background" value="#d9dce1" checked><span class="swatch gray" aria-hidden="true"></span>그레이</label><label><input type="radio" name="background" value="#ffffff"><span class="swatch white" aria-hidden="true"></span>화이트</label><label><input type="radio" name="background" value="#e6edf5"><span class="swatch blue" aria-hidden="true"></span>블루</label></fieldset></div></li>
-          <li id="stepSave" class="step"><span class="step-number" aria-hidden="true">03</span><div><h3>원본과 비교하고 저장</h3><p>3:4 비율 · 708 × 944px · PNG 이미지</p></div></li>
+          <li id="stepSave" class="step"><span class="step-number" aria-hidden="true">03</span><div><h3>원본과 비교하고 저장</h3><p>3:4 비율 · 708 × 944px · PNG · JPG 이미지</p></div></li>
         </ol>
         <div id="statusPanel" class="status-panel" role="status" aria-live="polite" aria-atomic="true"><span id="statusIcon" class="status-dot" aria-hidden="true"></span><p id="statusText">사진을 선택하면 여기서 다음 단계를 안내할게요.</p></div>
         <button id="convertButton" class="primary-button" type="button" disabled>프로필 만들기 <span aria-hidden="true">↗</span></button>
+        <div id="exportOptions" class="export-options" hidden><label for="downloadFormat">저장 형식</label><select id="downloadFormat"><option value="png">PNG · 무손실 저장</option><option value="jpeg">JPG · 가벼운 파일</option></select></div>
         <button id="downloadButton" class="primary-button download-button" type="button" hidden>완성한 프로필 저장 <span aria-hidden="true">↓</span></button>
+        <button id="shareButton" class="secondary-button share-button" type="button" hidden>사진 공유 / 기기에 저장</button>
+        <button id="editAgainButton" class="text-button edit-again" type="button" hidden>이 사진으로 배경을 바꿔 다시 만들기</button>
         <div class="secondary-actions"><button id="cancelButton" class="text-button" type="button" hidden>처리 취소</button><button id="resetButton" class="text-button" type="button" hidden>처음부터 다시</button></div>
         <p id="privacyNote" class="privacy-note">사진 선택만으로는 서버에 전송되지 않아요. ‘프로필 만들기’를 누르면 사진 판별과 변환을 시작합니다.</p>
         <div class="provider-line"><span id="providerStatus">서비스 연결 확인 중…</span><button id="retryConfigButton" class="text-button" type="button" hidden>다시 연결</button></div>
@@ -65,6 +70,8 @@
   </main>
   <footer><strong>KYOBODT</strong><span>당신다운 첫인상을 함께 만듭니다.</span></footer>
   <input id="galleryInput" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+  <input id="cameraInput" type="file" accept="image/*" capture="user" hidden>
+  <div id="dialogBackdrop" class="dialog-backdrop" hidden></div>
   <dialog id="passwordDialog" aria-labelledby="passwordTitle" aria-describedby="passwordDescription">
     <form id="passwordForm"><span class="eyebrow">WELCOME TO PROFILE STUDIO</span><h2 id="passwordTitle">이용 비밀번호를 입력해 주세요</h2><p id="passwordDescription">사진을 변환하려면 서비스 이용 확인이 필요해요.</p><label for="passwordInput">비밀번호</label><input id="passwordInput" type="password" autocomplete="current-password" maxlength="1024" required><p id="passwordError" class="field-error" role="alert"></p><div class="dialog-actions"><button id="passwordCancel" class="secondary-button" type="button">취소</button><button id="passwordSubmit" class="primary-button" type="submit">확인</button></div></form>
   </dialog>

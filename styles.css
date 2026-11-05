@@ -879,3 +879,13 @@ dialog input {
     scroll-behavior:auto;
   }
 }
+
+.preview-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 8px; }
+.export-options { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; font-size: 12px; }
+.export-options select { font: inherit; color: #172b3b; border: 1px solid #bccbd4; border-radius: 7px; padding: 9px 10px; background: white; }
+.share-button { width: 100%; margin-top: 9px; padding: 13px; }
+.edit-again { display: block; margin: 12px auto 0; white-space: normal; }
+.offline-notice { padding: 12px 14px; border-radius: 8px; background: #fff2d9; color: #775617; font-size: 12px; line-height: 1.6; margin-bottom: 0; }
+.dialog-backdrop { position: fixed; inset: 0; z-index: 19; background: #102b4666; }
+dialog[data-fallback="true"][open] { position: fixed; inset: 0; z-index: 20; margin: auto; max-height: calc(100% - 40px); overflow-y: auto; }
+@media (max-width: 650px) { .preview-tools .text-button { padding: 10px 0; } .export-options select { font-size: 16px; max-width: 75%; } dialog input { font-size: 16px; } }

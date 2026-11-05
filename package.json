@@ -11,7 +11,9 @@
     "start:openai": "AI_PROVIDER=openai node server.mjs",
     "start:local": "AI_PROVIDER=local node server.mjs",
     "local-ai": "local-ai/.venv/bin/uvicorn server:app --app-dir local-ai --host 127.0.0.1 --port 8765",
-    "check": "node --check app.js && node --check server.mjs",
-    "test": "node --test"
+    "check": "node --check app.js && node --check server.mjs && node --check scripts/doctor.mjs",
+    "test": "node --test",
+    "doctor": "node scripts/doctor.mjs",
+    "local-ai:doctor": "python3 local-ai/doctor.py"
   }
 }
